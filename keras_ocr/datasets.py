@@ -10,7 +10,7 @@ import json
 import os
 
 import tqdm
-import imgaug
+import albumentations as A
 import PIL.Image
 import numpy as np
 
@@ -118,7 +118,7 @@ def get_cocotext_recognizer_dataset(
             if legible_only and ann["legibility"] != "legible":
                 continue
             dataset.append(
-                (filepath, np.array(ann["mask"]).reshape(-1, 2), ann["utf8_string"])
+                (filepath, np.array(ann["mask"], dtype=np.float32).reshape(-1, 2), ann["utf8_string"])
             )
     if return_raw_labels:
         return dataset, (labels, images_dir)
@@ -269,7 +269,7 @@ def get_icdar_2013_detector_dataset(cache_dir=None, skip_illegible=False):
                         continue
                     x1, y1, x2, y2 = map(int, row[:4])
                     current_line.append(
-                        (np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]]), character)
+                        (np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32), character)
                     )
         # Some lines only have illegible characters and if skip_illegible is True,
         # then these lines will be blank.
@@ -401,10 +401,10 @@ def get_detector_image_generator(
                     top -= np.random.randint(0, min(top, height / 2))
                 image, lines = tools.augment(
                     boxes=lines,
-                    augmenter=imgaug.augmenters.Sequential(
+                    augmenter=A.Sequential(
                         [
-                            imgaug.augmenters.Crop(px=(int(top), 0, 0, int(left))),
-                            imgaug.augmenters.CropToFixedSize(
+                            A.Crop(px=(int(top), 0, 0, int(left))),
+                            A.CropToFixedSize(
                                 width=width, height=height, position="right-bottom"
                             ),
                         ]

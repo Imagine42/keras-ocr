@@ -46,7 +46,8 @@ class Pipeline:
             for image in images
         ]
         max_height, max_width = np.array(
-            [image.shape[:2] for image, scale in images]
+            [image.shape[:2] for image, scale in images],
+            dtype=np.int32
         ).max(axis=0)
         scales = [scale for _, scale in images]
         images = np.array(

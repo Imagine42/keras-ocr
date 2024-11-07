@@ -27,6 +27,7 @@ import numpy as np
 import tensorflow as tf
 import efficientnet.tfkeras as efficientnet
 from tensorflow import keras
+import albumentations as A
 
 from . import tools
 
@@ -34,8 +35,8 @@ from . import tools
 def compute_input(image):
     # should be RGB order
     image = image.astype("float32")
-    mean = np.array([0.485, 0.456, 0.406])
-    variance = np.array([0.229, 0.224, 0.225])
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    variance = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
     image -= mean * 255
     image /= variance * 255
@@ -107,8 +108,8 @@ def compute_maps(heatmap, image_height, image_width, lines):
     assert image_height % 2 == 0, "Height must be an even number"
     assert image_width % 2 == 0, "Width must be an even number"
 
-    textmap = np.zeros((image_height // 2, image_width // 2)).astype("float32")
-    linkmap = np.zeros((image_height // 2, image_width // 2)).astype("float32")
+    textmap = np.zeros((image_height // 2, image_width // 2), dtype="float32")
+    linkmap = np.zeros((image_height // 2, image_width // 2), dtype="float32")
 
     src = np.array(
         [
@@ -389,25 +390,61 @@ def build_keras_model(weights_path: str = None, backbone_name="vgg"):
     y = keras.layers.Concatenate()([y, s1])
     features = upconv(y, n=4, filters=64)
 
-    y = keras.layers.Conv2D(
-        filters=32, kernel_size=3, strides=1, padding="same", name="conv_cls.0"
-    )(features)
-    y = keras.layers.Activation("relu", name="conv_cls.1")(y)
-    y = keras.layers.Conv2D(
-        filters=32, kernel_size=3, strides=1, padding="same", name="conv_cls.2"
-    )(y)
-    y = keras.layers.Activation("relu", name="conv_cls.3")(y)
-    y = keras.layers.Conv2D(
-        filters=16, kernel_size=3, strides=1, padding="same", name="conv_cls.4"
-    )(y)
-    y = keras.layers.Activation("relu", name="conv_cls.5")(y)
-    y = keras.layers.Conv2D(
-        filters=16, kernel_size=1, strides=1, padding="same", name="conv_cls.6"
-    )(y)
-    y = keras.layers.Activation("relu", name="conv_cls.7")(y)
-    y = keras.layers.Conv2D(
-        filters=2, kernel_size=1, strides=1, padding="same", name="conv_cls.8"
-    )(y)
+    # Conv2D 레이어들 복원
+    conv_cls_0 = keras.layers.Conv2D(
+        filters=32, 
+        kernel_size=3, 
+        strides=1, 
+        padding="same",
+        kernel_initializer="he_normal",
+        activation="relu", 
+        name="conv_cls.0"
+    )
+    y = conv_cls_0(features)
+    
+    conv_cls_2 = keras.layers.Conv2D(
+        filters=32, 
+        kernel_size=3, 
+        strides=1, 
+        padding="same",
+        kernel_initializer="he_normal",
+        activation="relu", 
+        name="conv_cls.2"
+    )
+    y = conv_cls_2(y)
+    
+    conv_cls_4 = keras.layers.Conv2D(
+        filters=16, 
+        kernel_size=3, 
+        strides=1, 
+        padding="same",
+        kernel_initializer="he_normal",
+        activation="relu", 
+        name="conv_cls.4"
+    )
+    y = conv_cls_4(y)
+    
+    conv_cls_6 = keras.layers.Conv2D(
+        filters=16, 
+        kernel_size=1, 
+        strides=1, 
+        padding="same",
+        kernel_initializer="he_normal",
+        activation="relu", 
+        name="conv_cls.6"
+    )
+    y = conv_cls_6(y)
+    
+    conv_cls_8 = keras.layers.Conv2D(
+        filters=2, 
+        kernel_size=1, 
+        strides=1, 
+        padding="same",
+        kernel_initializer="he_normal",
+        name="conv_cls.8"
+    )
+    y = conv_cls_8(y)
+
     if backbone_name != "vgg":
         y = keras.layers.Activation("sigmoid")(y)
     model = keras.models.Model(inputs=inputs, outputs=y)

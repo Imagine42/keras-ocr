@@ -7,6 +7,7 @@ import tensorflow as tf
 from tensorflow import keras
 import numpy as np
 import cv2
+import albumentations as A
 
 from . import tools
 
@@ -273,14 +274,19 @@ def build_model(
             locnet_y
         )
         locnet_y = keras.layers.Flatten()(locnet_y)
-        locnet_y = keras.layers.Dense(64, activation="relu")(locnet_y)
-        locnet_y = keras.layers.Dense(
-            6,
-            weights=[
-                np.zeros((64, 6), dtype="float32"),
-                np.array([[1, 0, 0], [0, 1, 0]], dtype="float32").flatten(),
-            ],
-        )(locnet_y)
+        
+        # Dense 레이어 생성
+        dense_1 = keras.layers.Dense(64, activation="relu")
+        locnet_y = dense_1(locnet_y)
+        
+        dense_2 = keras.layers.Dense(6)
+        locnet_y = dense_2(locnet_y)
+        
+        # 가중치 초기화
+        zeros = np.zeros((64, 6), dtype='float32')
+        identity = np.array([[1, 0, 0], [0, 1, 0]], dtype='float32').flatten()
+        dense_2.set_weights([zeros, identity])
+
         localization_net = keras.models.Model(inputs=stn_input_layer, outputs=locnet_y)
         x = keras.layers.Lambda(_transform, output_shape=stn_input_output_shape)(
             [x, localization_net(x)]
@@ -293,7 +299,14 @@ def build_model(
         name="reshape",
     )(x)
 
-    x = keras.layers.Dense(rnn_units[0], activation="relu", name="fc_9")(x)
+    # Dense 레이어 생성
+    fc_9 = keras.layers.Dense(
+        rnn_units[0], 
+        activation="relu",
+        kernel_initializer="he_normal",
+        name="fc_9"
+    )
+    x = fc_9(x)
 
     rnn_1_forward = keras.layers.LSTM(
         rnn_units[0],
@@ -325,12 +338,16 @@ def build_model(
     x = keras.layers.Concatenate()([rnn_2_forward, rnn_2_back])
     backbone = keras.models.Model(inputs=inputs, outputs=x)
     x = keras.layers.Dropout(dropout, name="dropout")(x)
-    x = keras.layers.Dense(
+    
+    # 출력 Dense 레이어
+    fc_12 = keras.layers.Dense(
         len(alphabet) + 1,
         kernel_initializer="he_normal",
         activation="softmax",
-        name="fc_12",
-    )(x)
+        name="fc_12"
+    )
+    x = fc_12(x)
+
     x = keras.layers.Lambda(lambda x: x[:, rnn_steps_to_discard:])(x)
     model = keras.models.Model(inputs=inputs, outputs=x)
 
@@ -411,38 +428,48 @@ class Recognizer:
 
     def get_batch_generator(self, image_generator, batch_size=8, lowercase=False):
         """
-        Generate batches of training data from an image generator. The generator
-        should yield tuples of (image, sentence) where image contains a single
-        line of text and sentence is a string representing the contents of
-        the image. If a sample weight is desired, it can be provided as a third
-        entry in the tuple, making each tuple an (image, sentence, weight) tuple.
-
-        Args:
-            image_generator: An image / sentence tuple generator. The images should
-                be in color even if the OCR is setup to handle grayscale as they
-                will be converted here.
-            batch_size: How many images to generate at a time.
-            lowercase: Whether to convert all characters to lowercase before
-                encoding.
+        Generate batches of training data from an image generator.
         """
-        y = np.zeros((batch_size, 1))
+        # Albumentations transform 설정
+        transform = A.Compose([
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            A.RandomBrightnessContrast(p=0.5),
+            A.GaussNoise(p=0.2),
+            A.Blur(blur_limit=3, p=0.3),
+            A.RandomRotate90(p=0.2),
+            A.HorizontalFlip(p=0.2)
+        ])
+
+        y = np.zeros((batch_size, 1), dtype=np.float32)  # dtype 명시
         if self.training_model is None:
             raise Exception("You must first call create_training_model().")
         max_string_length = self.training_model.input_shape[1][1]
         while True:
             batch = [sample for sample, _ in zip(image_generator, range(batch_size))]
             images: typing.Union[typing.List[np.ndarray], np.ndarray]
-            if not self.model.input_shape[-1] == 3:
-                images = [
-                    cv2.cvtColor(sample[0], cv2.COLOR_RGB2GRAY)[..., np.newaxis]
-                    for sample in batch
-                ]
-            else:
-                images = [sample[0] for sample in batch]
-            images = np.array([image.astype("float32") / 255 for image in images])
+            
+            # Albumentations를 사용한 이미지 전처리
+            processed_images = []
+            for sample in batch:
+                image = np.asarray(sample[0], dtype=np.uint8)  # dtype 명시
+                if not self.model.input_shape[-1] == 3:
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+                    image = np.stack([image] * 3, axis=-1)
+                
+                transformed = transform(image=image)
+                processed_image = transformed['image']
+                
+                if not self.model.input_shape[-1] == 3:
+                    processed_image = processed_image[..., 0:1]
+                    
+                processed_images.append(processed_image)
+                
+            images = np.asarray(processed_images, dtype=np.float32)  # dtype 명시
+
             sentences = [sample[1].strip() for sample in batch]
             if lowercase:
                 sentences = [sentence.lower() for sentence in sentences]
+            
             for c in "".join(sentences):
                 assert c in self.alphabet, f"Found illegal character: {c}"
             assert all(sentences), "Found a zero length sentence."
@@ -453,29 +480,27 @@ class Recognizer:
                 "Strings with multiple sequential spaces are not permitted. "
                 "See https://github.com/faustomorales/keras-ocr/issues/54"
             )
-            label_length = np.array([len(sentence) for sentence in sentences])[
-                :, np.newaxis
-            ]
+            
+            # numpy 2.0 호환을 위한 dtype 명시
+            label_length = np.array([len(sentence) for sentence in sentences], dtype=np.int32)[:, np.newaxis]
             labels = np.array(
                 [
                     [self.alphabet.index(c) for c in sentence]
                     + [-1] * (max_string_length - len(sentence))
                     for sentence in sentences
-                ]
+                ],
+                dtype=np.int32
             )
-            input_length = np.ones((batch_size, 1)) * max_string_length
+            input_length = np.ones((batch_size, 1), dtype=np.int32) * max_string_length
+            
             if len(batch[0]) == 3:
-                sample_weights = np.array([sample[2] for sample in batch])
+                sample_weights = np.array([sample[2] for sample in batch], dtype=np.float32)
                 yield (images, labels, input_length, label_length), y, sample_weights
             else:
                 yield (images, labels, input_length, label_length), y
 
     def recognize(self, image):
-        """Recognize text from a single image.
-
-        Args:
-            image: A pre-cropped image containing characters
-        """
+        """Recognize text from a single image."""
         image = tools.read_and_fit(
             filepath_or_array=image,
             width=self.prediction_model.input_shape[2],
@@ -483,9 +508,8 @@ class Recognizer:
             cval=0,
         )
         if self.prediction_model.input_shape[-1] == 1 and image.shape[-1] == 3:
-            # Convert color to grayscale
             image = cv2.cvtColor(image, code=cv2.COLOR_RGB2GRAY)[..., np.newaxis]
-        image = image.astype("float32") / 255
+        image = np.asarray(image, dtype=np.float32) / 255  # dtype 명시
         return "".join(
             [
                 self.alphabet[idx]

@@ -7,7 +7,7 @@ import urllib.request
 import urllib.parse
 
 import cv2
-import imgaug
+import albumentations as A
 import numpy as np
 import validators
 import typing_extensions as tx
@@ -83,16 +83,18 @@ def warpBox(
     """
     if cval is None:
         cval = (0, 0, 0) if len(image.shape) == 3 else 0
+        
     if not skip_rotate:
         box, _ = get_rotated_box(box)
+    
     w, h = get_rotated_width_height(box)
-    assert (target_width is None and target_height is None) or (
-        target_width is not None and target_height is not None
-    ), "Either both or neither of target width and height must be provided."
+    
     if target_width is None and target_height is None:
         target_width = w
         target_height = h
+        
     scale = min(target_width / w, target_height / h)
+    
     M = cv2.getPerspectiveTransform(
         src=box,
         dst=np.array(
@@ -105,6 +107,7 @@ def warpBox(
         ).astype("float32"),
     )
     crop = cv2.warpPerspective(image, M, dsize=(int(scale * w), int(scale * h)))
+    
     target_shape = (
         (target_height, target_width, 3)
         if len(image.shape) == 3
@@ -262,94 +265,103 @@ def adjust_boxes(
 
 def augment(
     boxes,
-    augmenter: imgaug.augmenters.meta.Augmenter,
+    augmenter=None,
     image=None,
     boxes_format="boxes",
     image_shape=None,
     area_threshold=0.5,
     min_area=None,
 ):
-    """Augment an image and associated boxes together.
-
-    Args:
-        image: The image which we wish to apply the augmentation.
-        boxes: The boxes that will be augmented together with the image
-        boxes_format: The format for the boxes. See the `drawBoxes` function
-            for an explanation on the options.
-        image_shape: The shape of the input image if no image will be provided.
-        area_threshold: Fraction of bounding box that we require to be
-            in augmented image to include it.
-        min_area: The minimum area for a character to be included.
-    """
+    """Augment an image and associated boxes together."""
     if image is None and image_shape is None:
         raise ValueError('One of "image" or "image_shape" must be provided.')
-    augmenter = augmenter.to_deterministic()
 
     if image is not None:
-        image_augmented = augmenter(image=image)
-        image_shape = image.shape[:2]
-        image_augmented_shape = image_augmented.shape[:2]
-    else:
-        image_augmented = None
-        width_augmented, height_augmented = augmenter.augment_keypoints(
-            imgaug.KeypointsOnImage.from_xy_array(
-                xy=[[image_shape[1], image_shape[0]]], shape=image_shape
+        # albumentations는 이미지와 박스를 동시에 변환
+        if boxes_format == "boxes":
+            keypoints = flatten([[tuple(point) for point in box] for box in boxes])
+            transformed = augmenter(
+                image=np.asarray(image, dtype=np.uint8),  # dtype 명시
+                keypoints=keypoints
             )
-        ).to_xy_array()[0]
-        image_augmented_shape = (height_augmented, width_augmented)
+            image_augmented = transformed['image']
+            keypoints_augmented = transformed['keypoints']
+            
+            # 박스 재구성 
+            boxes_augmented = []
+            idx = 0
+            for box in boxes:
+                new_box = []
+                for _ in range(4):  # 각 박스는 4개의 점으로 구성
+                    if idx < len(keypoints_augmented):
+                        new_box.append(list(keypoints_augmented[idx]))
+                        idx += 1
+                if len(new_box) == 4:  # 유효한 박스만 추가
+                    boxes_augmented.append(np.array(new_box, dtype=np.float32))  # dtype 명시
 
-    def box_inside_image(box):
-        area_before = cv2.contourArea(np.array(box, dtype="int32")[:, np.newaxis, :])
-        if area_before == 0:
-            return False, box
-        clipped = box.copy()
-        clipped[:, 0] = clipped[:, 0].clip(0, image_augmented_shape[1])
-        clipped[:, 1] = clipped[:, 1].clip(0, image_augmented_shape[0])
-        area_after = cv2.contourArea(np.array(clipped, dtype="int32")[:, np.newaxis, :])
-        return ((area_after / area_before) >= area_threshold) and (
-            min_area is None or area_after > min_area
-        ), clipped
+        elif boxes_format == "lines":
+            # lines 형식 처리
+            keypoints = []
+            for line in boxes:
+                for box, _ in line:
+                    keypoints.extend([tuple(point) for point in box])
+            
+            transformed = augmenter(
+                image=np.asarray(image, dtype=np.uint8),  # dtype 명시
+                keypoints=keypoints
+            )
+            image_augmented = transformed['image']
+            keypoints_augmented = transformed['keypoints']
+            
+            # lines 재구성
+            boxes_augmented = []
+            idx = 0
+            for line in boxes:
+                new_line = []
+                for box, character in line:
+                    if idx + 4 <= len(keypoints_augmented):
+                        new_box = np.array([list(keypoints_augmented[i]) for i in range(idx, idx+4)], dtype=np.float32)  # dtype 명시
+                        new_line.append((new_box, character))
+                        idx += 4
+                if new_line:  # 유효한 라인만 추가
+                    boxes_augmented.append(new_line)
 
-    def augment_box(box):
-        return augmenter.augment_keypoints(
-            imgaug.KeypointsOnImage.from_xy_array(box, shape=image_shape)
-        ).to_xy_array()
+        elif boxes_format == "predictions":
+            # predictions 형식 처리 
+            keypoints = []
+            for _, box in boxes:
+                keypoints.extend([tuple(point) for point in box])
+                
+            transformed = augmenter(
+                image=np.asarray(image, dtype=np.uint8),  # dtype 명시
+                keypoints=keypoints
+            )
+            image_augmented = transformed['image']
+            keypoints_augmented = transformed['keypoints']
+            
+            # predictions 재구성
+            boxes_augmented = []
+            idx = 0
+            for word, _ in boxes:
+                if idx + 4 <= len(keypoints_augmented):
+                    new_box = np.array([list(keypoints_augmented[i]) for i in range(idx, idx+4)], dtype=np.float32)  # dtype 명시
+                    boxes_augmented.append((word, new_box))
+                    idx += 4
+        else:
+            raise NotImplementedError(f"Unsupported boxes format: {boxes_format}")
 
-    if boxes_format == "boxes":
-        boxes_augmented = [
-            box
-            for inside, box in [
-                box_inside_image(box) for box in map(augment_box, boxes)
-            ]
-            if inside
-        ]
-    elif boxes_format == "lines":
-        boxes_augmented = [
-            [(augment_box(box), character) for box, character in line] for line in boxes
-        ]
-        boxes_augmented = [
-            [
-                (box, character)
-                for (inside, box), character in [
-                    (box_inside_image(box), character) for box, character in line
-                ]
-                if inside
-            ]
-            for line in boxes_augmented
-        ]
-        # Sometimes all the characters in a line are removed.
-        boxes_augmented = [line for line in boxes_augmented if line]
-    elif boxes_format == "predictions":
-        boxes_augmented = [(word, augment_box(box)) for word, box in boxes]
-        boxes_augmented = [
-            (word, box)
-            for word, (inside, box) in [
-                (word, box_inside_image(box)) for word, box in boxes_augmented
-            ]
-            if inside
-        ]
     else:
-        raise NotImplementedError(f"Unsupported boxes format: {boxes_format}")
+        # image가 None인 경우
+        image_augmented = None
+        if boxes_format == "boxes":
+            boxes_augmented = boxes
+        elif boxes_format == "lines":
+            boxes_augmented = boxes
+        elif boxes_format == "predictions":
+            boxes_augmented = boxes
+        else:
+            raise NotImplementedError(f"Unsupported boxes format: {boxes_format}")
+
     return image_augmented, boxes_augmented
 
 

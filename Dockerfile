@@ -1,4 +1,4 @@
-FROM python:3.7
+FROM python:3.12
 WORKDIR /usr/src
 # Avoid re-downloading weights when other things
 # change.

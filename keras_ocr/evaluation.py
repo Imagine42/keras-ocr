@@ -22,11 +22,11 @@ def iou_score(box1, box2):
     if len(box1) == 2:
         x1, y1 = box1[0]
         x2, y2 = box1[1]
-        box1 = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+        box1 = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
     if len(box2) == 2:
         x1, y1 = box2[0]
         x2, y2 = box2[1]
-        box2 = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+        box2 = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
     if any(
         cv2.contourArea(np.array(box, dtype="int32")[:, np.newaxis, :]) == 0
         for box in [box1, box2]
